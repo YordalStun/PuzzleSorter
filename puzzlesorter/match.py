@@ -315,6 +315,16 @@ def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
     edges to a corner - a real geometric fact independent of what its printed
     content matches, so it's applied as a hard AND on top of valid_mask
     rather than left to content-matching confidence alone.
+
+    That constraint can still legitimately come up empty for a specific
+    piece - e.g. a larger-than-average piece whose full bounding box doesn't
+    fit inside the remaining (already fragmented by other placements) gap
+    area within the band, even though the band is generously sized on
+    average (verified against a real photo: this isn't a rare corner case,
+    it affected roughly half of that run's real border pieces). Rather than
+    silently dropping the piece from the results, fall back to searching
+    under the plain valid_mask so it still gets a match - just without the
+    geometric backup.
     """
     H = alignment.homography
     seed_scale, _ = local_affine(alignment, approx_target_point)
@@ -336,6 +346,10 @@ def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
         result = match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
                                         scale_photo_per_target=seed_scale,
                                         valid_mask=piece_valid_mask, **kwargs)
+        if result is None and piece_valid_mask is not valid_mask:
+            result = match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
+                                            scale_photo_per_target=seed_scale,
+                                            valid_mask=valid_mask, **kwargs)
         if result is None:
             continue
         angle, ncc_score, combined_score, color_dist, (tx, ty), size = result

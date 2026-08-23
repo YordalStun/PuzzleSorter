@@ -119,12 +119,20 @@ def main(argv=None):
     # be generously wider than one piece: match._correlation_map requires a
     # candidate rotation's WHOLE bounding box (up to the piece's diagonal, at a
     # 45-degree rotation) to fit inside, or that rotation has no valid position
-    # at all and the piece silently gets no match.
+    # at all for that piece. sqrt(avg_piece_area) is the diagonal of an
+    # idealized SQUARE piece at the AVERAGE size - real pieces run bigger
+    # (irregular tab/blank shapes, plus real size variance around the
+    # average), so this needs real headroom above 1x; verified against an
+    # actual photo that 1.6x still silently dropped real border pieces
+    # whose true bounding box didn't fit, 2.2x recovered them. match_all
+    # also falls back to the unconstrained search if the constrained one
+    # finds nothing, so an unusually large piece still gets a match rather
+    # than vanishing from the output.
     piece_span = float(np.sqrt(avg_piece_area_target))
     border_mask = build_border_band_mask(target.shape, picture_quad_target,
-                                          band_px=int(round(1.6 * piece_span)))
+                                          band_px=int(round(2.2 * piece_span)))
     corner_mask = build_corner_regions_mask(target.shape, picture_quad_target,
-                                             radius_px=int(round(1.6 * piece_span)))
+                                             radius_px=int(round(2.2 * piece_span)))
 
     print("Detecting loose pieces...")
     roi = build_roi_mask(photo.shape, board_mask=board.mask, exclude_rects=args.exclude,

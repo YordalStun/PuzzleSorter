@@ -303,3 +303,45 @@ def test_build_corner_regions_mask_covers_only_the_four_corners():
     for cx, cy in [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)]:
         assert mask[cy, cx] > 0, f"corner ({cx},{cy}) should be covered"
     assert mask[size // 2, size // 2] == 0, "center must not be covered"
+
+
+def test_match_all_falls_back_to_unconstrained_search_when_the_band_has_no_room():
+    """Regression test for a real bug found on an actual puzzle photo: a
+    border/corner band sized generously "on average" can still be narrower
+    than a specific, larger-than-average piece's own bounding box once
+    intersected with the (already fragmented by other placements) remaining
+    gap area - roughly half of one real photo's true border pieces hit
+    this. match_all must not silently drop such a piece; it should fall
+    back to the plain valid_mask rather than reporting nothing at all."""
+    size = 400
+    target = _synthetic_textured_image(seed=9, size=size)
+
+    # plant the piece's content well inside the interior, outside any
+    # plausible border band
+    half = 20
+    cx, cy = size // 2, size // 2
+    piece_bgr = target[cy - half:cy + half, cx - half:cx + half].copy()
+    full_mask = np.zeros((size, size), np.uint8)
+    full_mask[cy - half:cy + half, cx - half:cx + half] = 255
+    border_piece = Piece(id=1, mask=full_mask, bbox=(cx - half, cy - half, 2 * half, 2 * half),
+                          centroid=(float(cx), float(cy)), angle_hint=0.0,
+                          straight_edge_count=1)
+
+    polygon = np.array([[0, 0], [size, 0], [size, size], [0, size]], dtype=np.float64)
+    valid_mask = build_valid_mask((size, size), polygon, inset_px=0)
+    # deliberately too narrow for this piece's own ~57px rotated diagonal -
+    # the constrained search must come up completely empty, same as the
+    # real bug
+    border_mask = build_border_band_mask((size, size), polygon, band_px=10)
+    assert np.count_nonzero(cv2.bitwise_and(valid_mask, border_mask)) > 0, "band must exist at all"
+
+    matches = match_all([border_piece], target, target, _IdentityAlignment(),
+                         search_rect=(0, 0, size, size), approx_target_point=(cx, cy),
+                         valid_mask=valid_mask, border_mask=border_mask,
+                         coarse_step=20, fine_step=4, fine_range=10)
+
+    assert len(matches) == 1, "piece must not be silently dropped when the constrained search is empty"
+    m = matches[0]
+    tx, ty = m.target_xy
+    assert np.hypot(tx - cx, ty - cy) < 5, (
+        f"fallback should have found the true (interior) planted match at ({cx},{cy}), got ({tx:.0f},{ty:.0f})")
