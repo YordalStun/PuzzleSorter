@@ -6,12 +6,14 @@ pieces are split into individual pieces via watershed, seeded from an
 expected single-piece pixel area.
 """
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 from scipy import ndimage as ndi
 from skimage.feature import peak_local_max
+
+from .shape import PieceShape, classify_piece_shape
 
 Rect = Tuple[int, int, int, int]  # x, y, w, h
 
@@ -23,6 +25,8 @@ class Piece:
     bbox: Rect
     centroid: Tuple[float, float]
     angle_hint: float  # minAreaRect angle, degrees; a coarse orientation prior
+    edge_shape: Optional[PieceShape] = None  # None if classification failed
+    straight_edge_count: int = 0  # 0 if edge_shape is None - treated as "interior, unknown"
 
 
 def build_roi_mask(photo_shape, board_mask=None, exclude_rects: Sequence[Rect] = (),
@@ -144,12 +148,25 @@ def detect_pieces(photo_bgr, roi_mask, expected_piece_area,
                 if len(biggest) >= 5:
                     angle = cv2.minAreaRect(biggest)[-1]
 
+            # only classify edges for something that plausibly IS a single
+            # piece - a still-merged multi-piece cluster's outline isn't any
+            # one piece's tab/blank pattern, and would just be noise here
+            edge_shape = None
+            if a <= expected_piece_area * max_single_factor:
+                try:
+                    edge_shape = classify_piece_shape(
+                        pm, expected_piece_size=float(np.sqrt(expected_piece_area)))
+                except (ValueError, cv2.error):
+                    pass
+
             pieces.append(Piece(
                 id=next_id,
                 mask=pm,
                 bbox=(int(x0), int(y0), int(x1 - x0 + 1), int(y1 - y0 + 1)),
                 centroid=(float(cx), float(cy)),
                 angle_hint=float(angle),
+                edge_shape=edge_shape,
+                straight_edge_count=edge_shape.straight_count if edge_shape else 0,
             ))
             next_id += 1
 

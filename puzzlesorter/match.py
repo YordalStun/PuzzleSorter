@@ -59,7 +59,40 @@ def build_valid_mask(target_shape, polygon, inset_px=12):
     cv2.fillPoly(mask, [polygon], 255)
     if inset_px > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * inset_px + 1, 2 * inset_px + 1))
-        mask = cv2.erode(mask, kernel)
+        # cv2.erode's default border handling treats pixels outside the array
+        # as foreground, specifically so shapes touching the array edge don't
+        # erode there - the opposite of what's wanted here, since the polygon
+        # can itself touch or nearly touch the target array's true boundary
+        # (e.g. a box photo where the picture fills most of the frame), and
+        # that is exactly where this margin matters most. borderValue=0 makes
+        # erosion treat "off the array" the same as "off the polygon".
+        mask = cv2.erode(mask, kernel, borderValue=0)
+    return mask
+
+
+def build_border_band_mask(target_shape, polygon, band_px):
+    """A 0/255 mask: the polygon's own area minus everything more than
+    band_px in from its boundary - i.e. a band hugging the picture's edge,
+    roughly one outer row/column of grid cells wide. A piece with a detected
+    straight edge (see shape.classify_piece_shape) is physically a border
+    piece and can only belong somewhere in this band, regardless of what its
+    printed content suggests."""
+    full = build_valid_mask(target_shape, polygon, inset_px=0)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band_px + 1, 2 * band_px + 1))
+    # see build_valid_mask: borderValue=0 so erosion isn't a no-op wherever
+    # `full` touches the array's true edge (band_px deep bands need to shrink
+    # in from there too, not just from the polygon's own interior boundary)
+    inset = cv2.erode(full, kernel, borderValue=0)
+    return cv2.bitwise_and(full, cv2.bitwise_not(inset))
+
+
+def build_corner_regions_mask(target_shape, polygon, radius_px):
+    """A 0/255 mask: small disks at each of the polygon's 4 corners. A piece
+    with 2+ detected straight edges is physically a corner piece and can
+    only belong at one of these 4 spots."""
+    mask = np.zeros(target_shape[:2], np.uint8)
+    for corner in np.asarray(polygon, dtype=np.float64):
+        cv2.circle(mask, tuple(corner.astype(int)), radius_px, 255, -1)
     return mask
 
 
@@ -269,11 +302,20 @@ def match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
 
 
 def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
-              approx_target_point, **kwargs) -> List[Match]:
+              approx_target_point, valid_mask=None, border_mask=None, corner_mask=None,
+              **kwargs) -> List[Match]:
     """approx_target_point: a target-space (x, y) near the board (e.g. the picture's
     center) used to seed the photo<->target scale estimate before the exact match
     location is known. The homography's scale/rotation vary slowly across the table
-    plane, so this is a fine approximation for pieces near the board."""
+    plane, so this is a fine approximation for pieces near the board.
+
+    border_mask/corner_mask (see build_border_band_mask/build_corner_regions_mask):
+    if given, a piece whose segmented silhouette has a detected straight edge
+    is physically constrained to the border band, and one with 2+ straight
+    edges to a corner - a real geometric fact independent of what its printed
+    content matches, so it's applied as a hard AND on top of valid_mask
+    rather than left to content-matching confidence alone.
+    """
     H = alignment.homography
     seed_scale, _ = local_affine(alignment, approx_target_point)
     matches = []
@@ -285,8 +327,15 @@ def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
         piece_bgr = photo_bgr[y0:y1, x0:x1]
         piece_mask = piece.mask[y0:y1, x0:x1]
 
+        piece_valid_mask = valid_mask
+        if piece.straight_edge_count >= 2 and corner_mask is not None:
+            piece_valid_mask = cv2.bitwise_and(valid_mask, corner_mask)
+        elif piece.straight_edge_count == 1 and border_mask is not None:
+            piece_valid_mask = cv2.bitwise_and(valid_mask, border_mask)
+
         result = match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
-                                        scale_photo_per_target=seed_scale, **kwargs)
+                                        scale_photo_per_target=seed_scale,
+                                        valid_mask=piece_valid_mask, **kwargs)
         if result is None:
             continue
         angle, ncc_score, combined_score, color_dist, (tx, ty), size = result

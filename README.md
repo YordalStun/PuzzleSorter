@@ -27,14 +27,22 @@ it's predicted to belong.
    everywhere *outside* the assembled region and any `--exclude` zones,
    segments loose pieces. Piles of touching pieces are split with a
    watershed transform seeded from the expected single-piece size.
-4. **Find gaps**: `find_assembled_region` only knows the assembled block's
+4. **Classify each piece's edge shape**: a piece's segmented silhouette is
+   fit against its nominal square/rectangular footprint to classify each of
+   its 4 sides as straight, tab (bump out) or blank (notch in). This is a
+   geometric fact independent of the piece's printed content: a straight
+   edge is only physically possible on the picture's outer border, and two
+   straight edges (adjacent, on a real piece) only at a corner. That's used
+   later to hard-constrain where the piece is even allowed to match, not
+   just as another content signal.
+5. **Find gaps**: `find_assembled_region` only knows the assembled block's
    outer extent, not which spots *within* it are already filled — a piece
    not yet placed leaves a gap that's invisible to a simple outer contour.
    The same texture-energy signal, now applied inside the block, tells gaps
    (plain mat, low texture) from filled spots (any printed piece content).
    Matches are restricted to actual gaps, so a piece is never pointed at
    somewhere already occupied by a different, correctly-placed piece.
-5. **Match**: each piece is matched against the target image with a
+6. **Match**: each piece is matched against the target image with a
    coarse-to-fine search over rotation (0-360°) and position, using masked
    normalized cross-correlation (only the piece's own pixels are compared,
    not its background) combined with an explicit color-agreement check
@@ -46,9 +54,13 @@ it's predicted to belong.
    boundary — the axis-aligned box drawn around a tilted picture has corners
    that fall outside it, e.g. onto a box's cardboard border or glare, which
    otherwise can win spuriously confident matches against low-detail pieces.
-   The match location is projected back onto the photo via the homography
-   from step 1 to get the arrow's destination.
-6. **Render**: numbered labels on every piece and its destination, arrows
+   A piece classified as a border or corner piece (step 4) is additionally
+   confined to a band hugging the picture's edge, or one of its 4 corners —
+   so a border piece never gets pointed at the picture's interior just
+   because its content happens to correlate well there. The match location
+   is projected back onto the photo via the homography from step 1 to get
+   the arrow's destination.
+7. **Render**: numbered labels on every piece and its destination, arrows
    drawn for the highest-confidence matches (`--max-arrows`), color-coded by
    match confidence (green/orange/red). `--batch-size` additionally splits
    the arrows across several smaller, much less cluttered images.
@@ -137,6 +149,16 @@ Other useful flags:
   same spot, the lower-scoring one is marked with a `?` and gets no arrow
   (it's shown but not trusted) rather than risking two confident-looking
   arrows pointing at the same place.
+- **Edge-shape classification** depends on a clean single-piece silhouette:
+  a still-merged watershed cluster, an unusually shallow tab/notch, or messy
+  segmentation can misclassify a side in either direction — reading a real
+  straight edge as a shallow tab (losing a constraint that would've helped),
+  or, less often, reading a genuinely interior edge as straight (wrongly
+  confining that piece to the border/corner search). A piece whose
+  classification fails outright, or comes back with no straight edges at
+  all, gets no border/corner constraint rather than a wrong one — but a
+  confident misclassification is still possible and shows up as a piece
+  that never finds a good match despite obviously belonging elsewhere.
 - **Runtime** scales with piece count × search resolution; a few hundred
   loose pieces can take several minutes.
 - Clutter on the table (tools, boxes, cups) needs to be pointed out via

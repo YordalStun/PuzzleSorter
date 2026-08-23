@@ -16,7 +16,8 @@ from .board import find_assembled_region, find_gaps
 from .color import estimate_color_correction
 from .iterate import run_iterative_solve
 from .pieces import build_roi_mask, detect_pieces
-from .match import match_all, flag_conflicts, build_valid_mask, restrict_to_gaps
+from .match import (match_all, flag_conflicts, build_valid_mask, restrict_to_gaps,
+                     build_border_band_mask, build_corner_regions_mask)
 from .visualize import render_solution, render_batches, write_csv
 
 
@@ -112,12 +113,29 @@ def main(argv=None):
     scale = local_affine(aln, board_center_target)[0]
     expected_piece_area_photo = avg_piece_area_target * scale ** 2
 
+    # a piece with a detected straight edge (see shape.classify_piece_shape) is
+    # physically a border piece, and one with 2+ a corner piece - true regardless
+    # of what its printed content matches best. The band/corner regions need to
+    # be generously wider than one piece: match._correlation_map requires a
+    # candidate rotation's WHOLE bounding box (up to the piece's diagonal, at a
+    # 45-degree rotation) to fit inside, or that rotation has no valid position
+    # at all and the piece silently gets no match.
+    piece_span = float(np.sqrt(avg_piece_area_target))
+    border_mask = build_border_band_mask(target.shape, picture_quad_target,
+                                          band_px=int(round(1.6 * piece_span)))
+    corner_mask = build_corner_regions_mask(target.shape, picture_quad_target,
+                                             radius_px=int(round(1.6 * piece_span)))
+
     print("Detecting loose pieces...")
     roi = build_roi_mask(photo.shape, board_mask=board.mask, exclude_rects=args.exclude,
                           margin_top=args.margin_top, margin_bottom=args.margin_bottom,
                           margin_left=args.margin_left, margin_right=args.margin_right)
     pieces = detect_pieces(photo, roi, expected_piece_area_photo)
-    print(f"  found {len(pieces)} candidate pieces")
+    n_corner = sum(1 for p in pieces if p.straight_edge_count >= 2)
+    n_border = sum(1 for p in pieces if p.straight_edge_count == 1)
+    print(f"  found {len(pieces)} candidate pieces "
+          f"({n_corner} corner, {n_border} other border, "
+          f"{len(pieces) - n_corner - n_border} interior, by detected edge shape)")
     if not pieces:
         print("error: no loose pieces detected - try adjusting --exclude/--margin-* "
               "to point the search at the right area of the photo", file=sys.stderr)
@@ -163,6 +181,7 @@ def main(argv=None):
             pieces, photo, target, aln, search_rect, valid_mask, board_center_target,
             avg_piece_area_target, color_correction=color_correction,
             auto_place_threshold=args.auto_place_threshold, max_rounds=args.iterate,
+            border_mask=border_mask, corner_mask=corner_mask,
             on_round_complete=_report_round)
 
         stem, ext = os.path.splitext(args.out)
@@ -199,6 +218,7 @@ def main(argv=None):
           f"(this can take a while)...")
     matches = match_all(pieces, photo, target, aln, search_rect,
                          approx_target_point=board_center_target, valid_mask=valid_mask,
+                         border_mask=border_mask, corner_mask=corner_mask,
                          color_correction=color_correction)
     print(f"  matched {len(matches)} pieces")
 

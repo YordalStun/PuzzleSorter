@@ -2,8 +2,10 @@ import numpy as np
 import cv2
 import pytest
 
-from puzzlesorter.match import (match_piece_to_target, _rotate_with_mask, build_valid_mask,
-                                 restrict_to_gaps)
+from puzzlesorter.match import (match_piece_to_target, match_all, _rotate_with_mask,
+                                 build_valid_mask, build_border_band_mask,
+                                 build_corner_regions_mask, restrict_to_gaps)
+from puzzlesorter.pieces import Piece
 
 
 def _synthetic_textured_image(size=900, seed=0):
@@ -236,3 +238,68 @@ def test_restrict_to_gaps_ands_photo_space_mask_into_target_space():
     assert combined[75, 75] > 0, "inside the gap should stay valid"
     assert combined[10, 10] == 0, "outside the gap (already filled) must be excluded"
     assert combined[150, 150] == 0
+
+
+class _IdentityAlignment:
+    homography = np.eye(3, dtype=np.float64)
+
+
+def test_match_all_confines_a_border_piece_to_the_border_band():
+    """A piece with a detected straight edge is physically a border piece,
+    full stop - regardless of what its printed content matches best. If its
+    true content only appears (or best matches) in the picture's interior,
+    that's a sign of a shape-classification error or a coincidental content
+    match, not a valid destination, and the border constraint should keep
+    match_all from reporting it anyway."""
+    size = 400
+    target = _synthetic_textured_image(seed=5, size=size)
+
+    # plant an exact, otherwise-perfect copy of the piece's content at the
+    # picture's dead center - deep inside the interior, far from any border
+    half = 20
+    cx, cy = size // 2, size // 2
+    piece_bgr = target[cy - half:cy + half, cx - half:cx + half].copy()
+    piece_mask_local = np.full(piece_bgr.shape[:2], 255, np.uint8)
+
+    full_mask = np.zeros((size, size), np.uint8)
+    full_mask[cy - half:cy + half, cx - half:cx + half] = piece_mask_local
+    border_piece = Piece(id=1, mask=full_mask, bbox=(cx - half, cy - half, 2 * half, 2 * half),
+                          centroid=(float(cx), float(cy)), angle_hint=0.0,
+                          straight_edge_count=1)
+
+    polygon = np.array([[0, 0], [size, 0], [size, size], [0, size]], dtype=np.float64)
+    valid_mask = build_valid_mask((size, size), polygon, inset_px=0)
+    # the valid-mask check requires the piece's WHOLE rotated bounding box to
+    # fit inside the band (see _correlation_map), which at a 45-degree
+    # rotation is the piece's diagonal (2*half*sqrt(2) = ~57px here) - the
+    # band must be comfortably wider than that or no placement is ever legal
+    # at any rotation and match_piece_to_target returns None for every angle
+    band_px = 80
+    border_mask = build_border_band_mask((size, size), polygon, band_px)
+
+    # sanity: the planted content's own location must NOT be in the band
+    assert border_mask[cy, cx] == 0
+
+    matches = match_all([border_piece], target, target, _IdentityAlignment(),
+                         search_rect=(0, 0, size, size), approx_target_point=(cx, cy),
+                         valid_mask=valid_mask, border_mask=border_mask,
+                         coarse_step=20, fine_step=4, fine_range=10)
+
+    assert len(matches) == 1
+    m = matches[0]
+    tx, ty = m.target_xy
+    assert border_mask[int(ty), int(tx)] > 0, (
+        f"border piece matched outside the border band at ({tx:.0f},{ty:.0f})")
+    assert m.ncc_score < 0.9, (
+        "should NOT have found the planted perfect match at the center - "
+        "the border constraint should have kept it out of reach")
+
+
+def test_build_corner_regions_mask_covers_only_the_four_corners():
+    size = 300
+    polygon = np.array([[0, 0], [size, 0], [size, size], [0, size]], dtype=np.float64)
+    mask = build_corner_regions_mask((size, size), polygon, radius_px=20)
+
+    for cx, cy in [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)]:
+        assert mask[cy, cx] > 0, f"corner ({cx},{cy}) should be covered"
+    assert mask[size // 2, size // 2] == 0, "center must not be covered"
