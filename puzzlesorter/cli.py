@@ -5,6 +5,7 @@ Example:
         --pieces 500 --out result.jpg --csv result.csv
 """
 import argparse
+import os
 import sys
 
 import cv2
@@ -13,8 +14,8 @@ import numpy as np
 from .align import align_target_to_photo, local_affine
 from .board import find_assembled_region
 from .pieces import build_roi_mask, detect_pieces
-from .match import match_all, flag_conflicts
-from .visualize import render_solution, write_csv
+from .match import match_all, flag_conflicts, build_valid_mask
+from .visualize import render_solution, render_batches, write_csv
 
 
 def _parse_rect(s):
@@ -46,8 +47,14 @@ def build_arg_parser():
     p.add_argument("--margin-left", type=int, default=0)
     p.add_argument("--margin-right", type=int, default=0)
     p.add_argument("--max-arrows", type=int, default=25,
-                   help="Only draw arrows for the N highest-confidence matches, to keep "
-                        "the image legible; every match still gets numbered labels.")
+                   help="Only draw arrows for the N highest-confidence matches on the "
+                        "single --out overview image; every match still gets a numbered "
+                        "label there. Use --batch-size for clearer, less cluttered images.")
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="Also write a series of clearer images with only this many "
+                        "arrows each (highest-confidence batches first), named "
+                        "<out>_batch01.jpg, <out>_batch02.jpg, ... Conflicted matches "
+                        "are left out of batches. Recommended: 8-12.")
     p.add_argument("--min-inliers", type=int, default=15,
                    help="Minimum ORB inlier matches required to trust the target<->photo "
                         "alignment.")
@@ -108,11 +115,15 @@ def main(argv=None):
     sx1 = min(target.shape[1], int(xs.max() + margin))
     sy1 = min(target.shape[0], int(ys.max() + margin))
     search_rect = (sx, sy, sx1 - sx, sy1 - sy)
+    # search_rect is an axis-aligned box around a possibly-tilted picture quad, so its
+    # corners can fall outside the true picture (the box's cardboard border, glare, a
+    # hand holding it, etc.) - constrain matches to the quad itself to avoid landing there.
+    valid_mask = build_valid_mask(target.shape, picture_quad_target)
 
     print(f"Matching {len(pieces)} pieces against the target image "
           f"(this can take a while)...")
     matches = match_all(pieces, photo, target, aln, search_rect,
-                         approx_target_point=board_center_target)
+                         approx_target_point=board_center_target, valid_mask=valid_mask)
     print(f"  matched {len(matches)} pieces")
 
     conflicts = flag_conflicts(matches, min_distance=0.5 * np.sqrt(avg_piece_area_target))
@@ -121,6 +132,15 @@ def main(argv=None):
     vis = render_solution(photo, pieces, matches, max_arrows=args.max_arrows,
                            conflicts=conflicts)
     cv2.imwrite(args.out, vis)
+
+    if args.batch_size:
+        stem, ext = os.path.splitext(args.out)
+        batches = render_batches(photo, pieces, matches, batch_size=args.batch_size,
+                                  conflicts=conflicts)
+        for i, batch_img in enumerate(batches, start=1):
+            batch_path = f"{stem}_batch{i:02d}{ext}"
+            cv2.imwrite(batch_path, batch_img)
+        print(f"Writing {len(batches)} batch image(s): {stem}_batch01{ext} ...")
 
     if args.csv:
         write_csv(args.csv, pieces, matches, conflicts=conflicts)

@@ -94,7 +94,7 @@ def _split_blob(blob_mask, expected_area, min_piece_area):
 
 def detect_pieces(photo_bgr, roi_mask, expected_piece_area,
                    min_area_factor=0.30, max_single_factor=1.6,
-                   max_cluster_factor=10.0) -> List[Piece]:
+                   max_cluster_factor=10.0, max_aspect_ratio=3.0) -> List[Piece]:
     """Find loose puzzle pieces within roi_mask.
 
     expected_piece_area: approximate pixel area of a single piece in this
@@ -129,6 +129,11 @@ def detect_pieces(photo_bgr, roi_mask, expected_piece_area,
                 continue
             ys, xs = np.nonzero(pm)
             x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+            w, h = x1 - x0 + 1, y1 - y0 + 1
+            if max(w, h) / max(1, min(w, h)) > max_aspect_ratio:
+                # a real piece (or small cluster of them) is roughly blob-shaped;
+                # a thin sliver is almost always an edge/shadow/wire artifact
+                continue
             M = cv2.moments(pm, binaryImage=True)
             cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
 

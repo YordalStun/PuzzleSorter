@@ -30,11 +30,17 @@ it's predicted to belong.
 4. **Match**: each piece is matched against the target image with a
    coarse-to-fine search over rotation (0-360°) and position, using masked
    normalized cross-correlation (only the piece's own pixels are compared,
-   not its background). The match location is projected back onto the photo
-   via the homography from step 1 to get the arrow's destination.
+   not its background). Matches are constrained to stay inside the target
+   picture's actual (possibly tilted) boundary — the axis-aligned box drawn
+   around a tilted picture has corners that fall outside it, e.g. onto a
+   box's cardboard border or glare, which otherwise can win spuriously
+   confident matches against low-detail pieces. The match location is
+   projected back onto the photo via the homography from step 1 to get the
+   arrow's destination.
 5. **Render**: numbered labels on every piece and its destination, arrows
    drawn for the highest-confidence matches (`--max-arrows`), color-coded by
-   match confidence (green/orange/red).
+   match confidence (green/orange/red). `--batch-size` additionally splits
+   the arrows across several smaller, much less cluttered images.
 
 ## Install
 
@@ -63,8 +69,14 @@ Other useful flags:
   one piece's pixel size; doesn't need to be exact.
 - `--margin-top/bottom/left/right N` — crop out photo edges (chair, wall,
   window, etc.) from the piece search.
-- `--max-arrows N` — cap how many arrows are drawn so the image stays
-  legible; every piece still gets a numbered label either way.
+- `--max-arrows N` — cap how many arrows are drawn on the single `--out`
+  overview image so it stays legible; every piece still gets a numbered
+  label either way.
+- `--batch-size N` — also write a series of clearer images with only N
+  arrows each (`solution_batch01.jpg`, `solution_batch02.jpg`, ...),
+  highest-confidence first. Recommended for puzzles with more than a
+  couple dozen loose pieces — a single image with 50+ crossing arrows is
+  unreadable. 8-12 is a good batch size.
 - `--min-inliers N` — raise this if alignment succeeds on a coincidental
   handful of feature matches.
 
@@ -78,6 +90,10 @@ Other useful flags:
 - **Low-detail pieces** (plain sky, water, single-color areas) are
   inherently ambiguous from image content alone — same as for a human
   solver. Trust the confidence color coding.
+- **Conflicting claims**: if two pieces' best match lands on essentially the
+  same spot, the lower-scoring one is marked with a `?` and gets no arrow
+  (it's shown but not trusted) rather than risking two confident-looking
+  arrows pointing at the same place.
 - **Runtime** scales with piece count × search resolution; a few hundred
   loose pieces can take several minutes.
 - Clutter on the table (tools, boxes, cups) needs to be pointed out via

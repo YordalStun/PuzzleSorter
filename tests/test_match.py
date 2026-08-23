@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 import pytest
 
-from puzzlesorter.match import match_piece_to_target, _rotate_with_mask
+from puzzlesorter.match import match_piece_to_target, _rotate_with_mask, build_valid_mask
 
 
 def _synthetic_textured_image(size=900, seed=0):
@@ -46,6 +46,79 @@ def test_match_recovers_known_rotation_and_position(true_angle):
     angle_err = min((angle - expected_angle) % 360.0, (expected_angle - angle) % 360.0)
     assert angle_err <= 3.0
     assert score > 0.5
+
+
+def test_valid_mask_prevents_matching_outside_picture_quad():
+    """Regression test for a real bug found on an actual puzzle photo: search_rect
+    is an axis-aligned bounding box around the (possibly tilted) picture quad, so
+    its corners can fall outside the true picture - e.g. into a box's cardboard
+    border. If something there happens to correlate strongly with a piece (as a
+    blurry/glary border did for a real piece), the match lands in nonsense content
+    instead of somewhere in the true picture. build_valid_mask must prevent that.
+
+    Setup: the piece's real content is planted ONLY in a "leak" corner outside a
+    tilted quad (inside the quad is unrelated noise), so an unconstrained search
+    is guaranteed to land in the leak zone - then a masked search must not.
+    """
+    size = 500
+    target = np.zeros((size, size, 3), np.uint8)
+    rng = np.random.default_rng(7)
+    target[:] = rng.integers(0, 255, size=(size, size, 3), dtype=np.uint8)
+
+    center = np.array([250.0, 250.0])
+    half = 130
+    square = np.array([[-half, -half], [half, -half], [half, half], [-half, half]],
+                       dtype=np.float64)
+    theta = np.radians(25)
+    R = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    quad = (square @ R.T) + center
+
+    # a piece cut from elsewhere entirely (never placed inside the quad at all)
+    source = np.zeros((size, size, 3), np.uint8)
+    for _ in range(150):
+        pt1 = tuple(rng.integers(0, size, size=2).tolist())
+        pt2 = tuple((np.array(pt1) + rng.integers(-40, 40, size=2)).tolist())
+        color = tuple(int(c) for c in rng.integers(0, 255, size=3))
+        cv2.line(source, pt1, pt2, color, 2)
+    half_p = 25
+    piece = source[100 - half_p:100 + half_p, 100 - half_p:100 + half_p].copy()
+    piece_mask = np.full(piece.shape[:2], 255, np.uint8)
+    piece_mask[:8, :8] = 0  # asymmetric notch so rotation isn't ambiguous
+
+    # plant it (unrotated - a trivial, unambiguous near-perfect match) in a
+    # bounding-box corner that's outside the tilted quad
+    bbox_x0, bbox_y0 = int(quad[:, 0].min()), int(quad[:, 1].min())
+    leak_x, leak_y = bbox_x0 + 5, bbox_y0 + 5
+    ph, pw = piece_mask.shape[:2]
+    assert cv2.pointPolygonTest(
+        quad.astype(np.float32), (leak_x + pw / 2, leak_y + ph / 2), False
+    ) < 0, "test setup bug: leak zone should be outside the quad"
+    region = target[leak_y:leak_y + ph, leak_x:leak_x + pw]
+    region[piece_mask > 0] = piece[piece_mask > 0]
+
+    search_rect = (bbox_x0, bbox_y0,
+                   int(quad[:, 0].max()) - bbox_x0, int(quad[:, 1].max()) - bbox_y0)
+
+    result_no_mask = match_piece_to_target(piece, piece_mask, target, search_rect,
+                                            scale_photo_per_target=1.0,
+                                            coarse_step=20, fine_step=4, fine_range=10)
+    _angle, score_no_mask, (mx, my), _size = result_no_mask
+    assert cv2.pointPolygonTest(quad.astype(np.float32), (mx, my), False) < 0, (
+        "test setup bug: an unconstrained search should find the only real match, "
+        "which is in the leak zone")
+    assert score_no_mask > 0.7
+
+    valid_mask = build_valid_mask(target.shape, quad, inset_px=0)
+    result_with_mask = match_piece_to_target(piece, piece_mask, target, search_rect,
+                                              scale_photo_per_target=1.0,
+                                              coarse_step=20, fine_step=4, fine_range=10,
+                                              valid_mask=valid_mask)
+    _angle2, score_with_mask, (mx2, my2), _size2 = result_with_mask
+    assert cv2.pointPolygonTest(quad.astype(np.float32), (mx2, my2), False) >= 0, (
+        "masked search must not return a location outside the picture quad")
+    assert score_with_mask < score_no_mask - 0.3, (
+        "masked search should fall back to a much weaker match against unrelated "
+        "noise inside the quad, not sneak out to the leak zone")
 
 
 def test_match_scores_true_match_higher_than_unrelated_piece():

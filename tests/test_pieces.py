@@ -28,6 +28,31 @@ def test_detects_separated_pieces_and_ignores_plain_background():
         assert abs(fy - ey) < 6
 
 
+def test_rejects_thin_slivers_as_implausible_piece_shapes():
+    """Regression test for a real false positive: a thin sliver of texture (the
+    rim of a pair of glasses, a wood-grain line) landed just outside a hand-drawn
+    exclusion box and was detected as a "piece" purely because its area passed
+    the size filter - it was never checked for looking anything like a piece.
+    Real jigsaw pieces (or small touching clusters of them) are roughly
+    blob-shaped; a several-pixel-tall sliver spanning tens of pixels is not."""
+    rng = np.random.default_rng(2)
+    img = np.full((400, 400, 3), 180, np.uint8)
+    _stamp_textured_blob(img, 100, 100, 40, rng)  # a normal, roughly-square piece
+
+    # a thin sliver: wide and short, comparable area to the real piece above
+    sliver_w, sliver_h = 160, 10
+    x0, y0 = 200, 200
+    img[y0:y0 + sliver_h, x0:x0 + sliver_w] = rng.integers(
+        0, 255, size=(sliver_h, sliver_w, 3), dtype=np.uint8)
+
+    roi = build_roi_mask(img.shape)
+    pieces = detect_pieces(img, roi, expected_piece_area=40 * 40)
+
+    assert len(pieces) == 1
+    assert abs(pieces[0].centroid[0] - 100) < 6
+    assert abs(pieces[0].centroid[1] - 100) < 6
+
+
 def test_exclude_rects_and_margins_remove_regions_from_search():
     rng = np.random.default_rng(1)
     img = np.full((400, 400, 3), 180, np.uint8)
