@@ -27,17 +27,28 @@ it's predicted to belong.
    everywhere *outside* the assembled region and any `--exclude` zones,
    segments loose pieces. Piles of touching pieces are split with a
    watershed transform seeded from the expected single-piece size.
-4. **Match**: each piece is matched against the target image with a
+4. **Find gaps**: `find_assembled_region` only knows the assembled block's
+   outer extent, not which spots *within* it are already filled — a piece
+   not yet placed leaves a gap that's invisible to a simple outer contour.
+   The same texture-energy signal, now applied inside the block, tells gaps
+   (plain mat, low texture) from filled spots (any printed piece content).
+   Matches are restricted to actual gaps, so a piece is never pointed at
+   somewhere already occupied by a different, correctly-placed piece.
+5. **Match**: each piece is matched against the target image with a
    coarse-to-fine search over rotation (0-360°) and position, using masked
    normalized cross-correlation (only the piece's own pixels are compared,
-   not its background). Matches are constrained to stay inside the target
-   picture's actual (possibly tilted) boundary — the axis-aligned box drawn
-   around a tilted picture has corners that fall outside it, e.g. onto a
-   box's cardboard border or glare, which otherwise can win spuriously
-   confident matches against low-detail pieces. The match location is
-   projected back onto the photo via the homography from step 1 to get the
-   arrow's destination.
-5. **Render**: numbered labels on every piece and its destination, arrows
+   not its background) combined with an explicit color-agreement check
+   (calibrated against the assembled region, to correct for the two photos'
+   different lighting/white balance) — correlation alone is tolerant of
+   outright hue mismatches, so without this a green piece can outscore a
+   blue one that's actually a better structural fit. Matches are also
+   constrained to stay inside the target picture's actual (possibly tilted)
+   boundary — the axis-aligned box drawn around a tilted picture has corners
+   that fall outside it, e.g. onto a box's cardboard border or glare, which
+   otherwise can win spuriously confident matches against low-detail pieces.
+   The match location is projected back onto the photo via the homography
+   from step 1 to get the arrow's destination.
+6. **Render**: numbered labels on every piece and its destination, arrows
    drawn for the highest-confidence matches (`--max-arrows`), color-coded by
    match confidence (green/orange/red). `--batch-size` additionally splits
    the arrows across several smaller, much less cluttered images.
@@ -90,6 +101,10 @@ Other useful flags:
 - **Low-detail pieces** (plain sky, water, single-color areas) are
   inherently ambiguous from image content alone — same as for a human
   solver. Trust the confidence color coding.
+- **Gap detection** is texture-based, same as loose-piece detection: a very
+  small single-piece gap right at the edge of the assembled block, or right
+  next to a low-texture (plain sky/water) piece, can be missed or merged
+  into the "filled" area, making that spot unavailable as a match target.
 - **Conflicting claims**: if two pieces' best match lands on essentially the
   same spot, the lower-scoring one is marked with a `?` and gets no arrow
   (it's shown but not trusted) rather than risking two confident-looking

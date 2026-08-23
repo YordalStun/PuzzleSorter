@@ -5,6 +5,7 @@ from typing import List, Tuple
 import cv2
 import numpy as np
 
+from . import color
 from .align import Alignment, local_affine
 
 
@@ -14,7 +15,10 @@ class Match:
     target_xy: Tuple[float, float]
     photo_xy: Tuple[float, float]
     rotation_degrees: float  # rotation to apply to the piece, in the photo frame
-    score: float
+    score: float  # combined score (structural match x color agreement) when
+    # color_correction was supplied to match_all, otherwise equal to ncc_score
+    ncc_score: float = None
+    color_distance: float = None  # Lab distance at the matched location; None if unscored
 
 
 def _rotate_with_mask(bgr, mask, angle):
@@ -58,11 +62,26 @@ def build_valid_mask(target_shape, polygon, inset_px=12):
     return mask
 
 
-def _match_at_angle(target_bgr, piece_bgr, piece_mask, angle, valid_mask=None):
+def restrict_to_gaps(valid_mask_target, gap_mask_photo, homography, target_shape):
+    """AND a target-space valid_mask with a photo-space gap mask (see
+    board.find_gaps), so matches are only allowed to land where a piece could
+    actually still go - not on top of one that's already placed.
+
+    Points in the picture polygon that map to filled (non-gap) board area, or
+    to nothing recognizable (a piece's true home not yet reached by the
+    board-detection heuristic), are excluded rather than silently trusted.
+    """
+    Hinv = np.linalg.inv(homography)
+    h, w = target_shape[:2]
+    gap_in_target = cv2.warpPerspective(gap_mask_photo, Hinv, (w, h), flags=cv2.INTER_NEAREST)
+    return cv2.bitwise_and(valid_mask_target, gap_in_target)
+
+
+def _correlation_map(target_bgr, piece_bgr, piece_mask, angle, valid_mask=None):
     rot_img, rot_mask = _rotate_with_mask(piece_bgr, piece_mask, angle)
     th, tw = rot_mask.shape[:2]
     if th >= target_bgr.shape[0] or tw >= target_bgr.shape[1] or th < 4 or tw < 4:
-        return -1.0, None, None
+        return None, (tw, th)
     mask3 = cv2.merge([rot_mask, rot_mask, rot_mask])
     res = cv2.matchTemplate(target_bgr, rot_img, cv2.TM_CCOEFF_NORMED, mask=mask3)
     res = np.nan_to_num(res, nan=-1.0, posinf=-1.0, neginf=-1.0)
@@ -75,17 +94,49 @@ def _match_at_angle(target_bgr, piece_bgr, piece_mask, angle, valid_mask=None):
         eroded = cv2.erode(valid_mask, kernel, anchor=(0, 0))
         valid_res = eroded[:res.shape[0], :res.shape[1]]
         res = np.where(valid_res > 0, res, -1.0)
+    return res, (tw, th)
+
+
+def _match_at_angle(target_bgr, piece_bgr, piece_mask, angle, valid_mask=None):
+    res, size = _correlation_map(target_bgr, piece_bgr, piece_mask, angle, valid_mask)
+    if res is None:
+        return -1.0, None, None
     _, maxval, _, maxloc = cv2.minMaxLoc(res)
-    return float(maxval), maxloc, (tw, th)
+    return float(maxval), maxloc, size
+
+
+def _match_at_angle_multi(target_bgr, piece_bgr, piece_mask, angle, valid_mask=None, top_n=3):
+    """Like _match_at_angle, but returns up to top_n well-separated local
+    maxima instead of just the global one - two very different locations can
+    both score well at the SAME rotation (no rotation difference at all
+    between them), and colour-aware re-ranking downstream can only consider
+    candidates that make it into this list in the first place."""
+    res, size = _correlation_map(target_bgr, piece_bgr, piece_mask, angle, valid_mask)
+    if res is None:
+        return []
+    tw, th = size
+    min_dist = max(1, int(0.5 * min(tw, th)))
+    work = res.copy()
+    hits = []
+    for _ in range(top_n):
+        _, maxval, _, maxloc = cv2.minMaxLoc(work)
+        if maxval <= -1.0:
+            break
+        hits.append((float(maxval), maxloc, size))
+        x0, y0 = max(0, maxloc[0] - min_dist), max(0, maxloc[1] - min_dist)
+        x1, y1 = min(work.shape[1], maxloc[0] + min_dist), min(work.shape[0], maxloc[1] + min_dist)
+        work[y0:y1, x0:x1] = -1.0
+    return hits
 
 
 def match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
                            scale_photo_per_target,
                            coarse_step=12, fine_step=2, fine_range=14,
-                           coarse_downscale=0.35, fine_window_factor=2.5,
-                           top_k_candidates=5, valid_mask=None):
+                           coarse_downscale=0.35, fine_window_factor=0.15,
+                           top_k_candidates=8, valid_mask=None, color_correction=None):
     """Search rotation (0-360) and position within target_bgr[search_rect] for the
-    best match of a piece crop. Returns (angle_deg, score, (target_x, target_y), size).
+    best match of a piece crop.
+    Returns (angle_deg, ncc_score, combined_score, color_dist, (target_x, target_y), size).
 
     Two-stage coarse-to-fine search for speed: the full search_rect is searched at
     reduced resolution over all coarse angles first; the best hit then seeds a small
@@ -95,6 +146,12 @@ def match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
     match may land (see build_valid_mask). search_rect is typically a generous
     axis-aligned bounding box, so this is what actually keeps matches inside the
     true (possibly tilted) picture area.
+
+    color_correction: optional Lab offset (see color.estimate_color_correction).
+    If given, the top-K candidates are re-ranked by ncc_score * color_agreement
+    rather than ncc_score alone - matchTemplate's correlation rewards structural
+    (edge/brightness-pattern) alignment and is surprisingly tolerant of outright
+    hue mismatches, so without this a green patch can win against a blue one.
 
     angle_deg is the rotation applied to piece_bgr (cv2 convention, positive =
     counter-clockwise) to align it with the target at the returned location.
@@ -128,14 +185,17 @@ def match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
                         if valid_crop is not None else None)
         eff_downscale = coarse_downscale
 
-    # every coarse angle's best hit is a candidate; the true global optimum can fall
-    # in a different angle bucket than the single best coarse score once downscaling
-    # blurs detail, so refine the top-K distinct candidates rather than just one.
+    # every coarse angle can contribute several spatially-distinct candidates
+    # (two very different locations can score well at the SAME rotation - no
+    # rotation difference between them at all), not just its single best hit,
+    # and the true global optimum can also fall in a different angle bucket
+    # than the single best coarse score once downscaling blurs detail. Refine
+    # the top-K candidates pooled across all of that, not just one per angle.
     coarse_hits = []  # (val, angle, loc)
     for angle in range(0, 360, coarse_step):
-        val, loc, _size = _match_at_angle(small_target, small_piece, small_mask, angle,
-                                           valid_mask=small_valid)
-        if loc is not None:
+        for val, loc, _size in _match_at_angle_multi(small_target, small_piece, small_mask,
+                                                       angle, valid_mask=small_valid,
+                                                       top_n=3):
             coarse_hits.append((val, angle, loc))
 
     if not coarse_hits:
@@ -144,9 +204,19 @@ def match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
     top_candidates = coarse_hits[:top_k_candidates]
 
     diag = int(np.ceil(np.hypot(*mask_resized.shape[:2]))) + 2
-    win_pad = int(diag * fine_window_factor)
+    # must stay well under the coarse stage's own candidate-separation distance
+    # (~0.5x piece size - see _match_at_angle_multi's min_dist), or two
+    # genuinely distinct candidates' fine-search windows overlap and both
+    # collapse onto whichever one has the single strongest peak, defeating the
+    # entire point of keeping candidates separate for colour re-ranking below.
+    # This only needs to cover the coarse stage's own discretization error
+    # (on the order of 1/coarse_downscale target pixels), not the piece size.
+    win_pad = max(6, int(diag * fine_window_factor))
 
-    best_val, best_loc, best_size, best_final_angle, best_offset = -1.0, None, None, 0.0, (0, 0)
+    # refine each top-K coarse candidate to its own local best, independently,
+    # instead of merging into one running best - color re-ranking below needs
+    # to compare distinct candidate locations against each other.
+    refined = []  # (ncc_val, angle, loc, size, offset)
     for _cval, cangle, cloc in top_candidates:
         full_x = cloc[0] / eff_downscale
         full_y = cloc[1] / eff_downscale
@@ -157,19 +227,44 @@ def match_piece_to_target(piece_bgr, piece_mask, target_bgr, search_rect,
         window = target_crop[wy0:wy1, wx0:wx1]
         window_valid = valid_crop[wy0:wy1, wx0:wx1] if valid_crop is not None else None
 
+        c_best_val, c_best_loc, c_best_size, c_best_angle = -1.0, None, None, cangle
         lo, hi = cangle - fine_range, cangle + fine_range + 1
         for angle in np.arange(lo, hi, fine_step):
             val, loc, size = _match_at_angle(window, piece_resized, mask_resized, angle,
                                               valid_mask=window_valid)
-            if val > best_val:
-                best_val, best_loc, best_size = val, loc, size
-                best_final_angle, best_offset = angle, (wx0, wy0)
+            if val > c_best_val:
+                c_best_val, c_best_loc, c_best_size, c_best_angle = val, loc, size, angle
+        if c_best_loc is not None:
+            refined.append((c_best_val, c_best_angle, c_best_loc, c_best_size, (wx0, wy0)))
 
-    if best_loc is None:
+    if not refined:
         return None
+
+    if color_correction is not None:
+        piece_lab = color.mean_lab(piece_resized, mask_resized)
+        scored = []
+        for ncc_val, angle, loc, size, offset in refined:
+            rot_img, rot_mask = _rotate_with_mask(piece_resized, mask_resized, angle)
+            tx0, ty0 = offset[0] + loc[0], offset[1] + loc[1]
+            patch = target_crop[ty0:ty0 + size[1], tx0:tx0 + size[0]]
+            patch_lab = color.mean_lab(patch, rot_mask[:patch.shape[0], :patch.shape[1]])
+            if patch_lab is None:
+                agreement, dist = 1.0, 0.0
+            else:
+                agreement, dist = color.color_agreement(piece_lab, patch_lab, color_correction)
+            combined = ncc_val * agreement
+            scored.append((combined, ncc_val, dist, angle, loc, size, offset))
+        scored.sort(key=lambda t: -t[0])
+        combined_val, ncc_val, color_dist, best_final_angle, best_loc, best_size, best_offset = scored[0]
+    else:
+        refined.sort(key=lambda t: -t[0])
+        ncc_val, best_final_angle, best_loc, best_size, best_offset = refined[0]
+        combined_val, color_dist = ncc_val, None
+
     target_x = sx + best_offset[0] + best_loc[0] + best_size[0] / 2.0
     target_y = sy + best_offset[1] + best_loc[1] + best_size[1] / 2.0
-    return float(best_final_angle) % 360.0, best_val, (target_x, target_y), best_size
+    return (float(best_final_angle) % 360.0, ncc_val, combined_val, color_dist,
+            (target_x, target_y), best_size)
 
 
 def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
@@ -193,7 +288,7 @@ def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
                                         scale_photo_per_target=seed_scale, **kwargs)
         if result is None:
             continue
-        angle, score, (tx, ty), _ = result
+        angle, ncc_score, combined_score, color_dist, (tx, ty), _ = result
 
         pt = cv2.perspectiveTransform(np.float32([[[tx, ty]]]), H)[0, 0]
         _, rot_h = local_affine(alignment, (tx, ty))
@@ -204,7 +299,9 @@ def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
             target_xy=(tx, ty),
             photo_xy=(float(pt[0]), float(pt[1])),
             rotation_degrees=rotation_photo,
-            score=score,
+            score=combined_score,
+            ncc_score=ncc_score,
+            color_distance=color_dist,
         ))
     return matches
 

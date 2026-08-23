@@ -100,12 +100,16 @@ def write_csv(path, pieces: List[Piece], matches: List[Match], conflicts: dict =
     piece_by_id = {p.id: p for p in pieces}
     with open(path, "w") as f:
         f.write("piece_id,photo_x,photo_y,dest_photo_x,dest_photo_y,"
-                "target_x,target_y,rotation_degrees,score,confidence,conflicted\n")
+                "target_x,target_y,rotation_degrees,score,ncc_score,color_distance,"
+                "confidence,conflicted\n")
         for m in sorted(matches, key=lambda m: -m.score):
             piece = piece_by_id[m.piece_id]
             is_conflicted = conflicts.get(m.piece_id, False)
             tier, _ = _confidence_tier(-1.0 if is_conflicted else m.score)
+            ncc = f"{m.ncc_score:.4f}" if m.ncc_score is not None else ""
+            cdist = f"{m.color_distance:.1f}" if m.color_distance is not None else ""
             f.write(f"{m.piece_id},{piece.centroid[0]:.1f},{piece.centroid[1]:.1f},"
                     f"{m.photo_xy[0]:.1f},{m.photo_xy[1]:.1f},"
                     f"{m.target_xy[0]:.1f},{m.target_xy[1]:.1f},"
-                    f"{m.rotation_degrees:.1f},{m.score:.4f},{tier},{is_conflicted}\n")
+                    f"{m.rotation_degrees:.1f},{m.score:.4f},{ncc},{cdist},"
+                    f"{tier},{is_conflicted}\n")

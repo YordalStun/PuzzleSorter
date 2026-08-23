@@ -2,7 +2,8 @@ import numpy as np
 import cv2
 import pytest
 
-from puzzlesorter.match import match_piece_to_target, _rotate_with_mask, build_valid_mask
+from puzzlesorter.match import (match_piece_to_target, _rotate_with_mask, build_valid_mask,
+                                 restrict_to_gaps)
 
 
 def _synthetic_textured_image(size=900, seed=0):
@@ -39,7 +40,7 @@ def test_match_recovers_known_rotation_and_position(true_angle):
                                     scale_photo_per_target=1.0,
                                     coarse_step=15, fine_step=3, fine_range=16)
     assert result is not None
-    angle, score, (tx, ty), _size = result
+    angle, score, _combined, _cdist, (tx, ty), _size = result
 
     assert np.hypot(tx - cx, ty - cy) < 2.0
     expected_angle = (-true_angle) % 360.0
@@ -102,7 +103,7 @@ def test_valid_mask_prevents_matching_outside_picture_quad():
     result_no_mask = match_piece_to_target(piece, piece_mask, target, search_rect,
                                             scale_photo_per_target=1.0,
                                             coarse_step=20, fine_step=4, fine_range=10)
-    _angle, score_no_mask, (mx, my), _size = result_no_mask
+    _angle, score_no_mask, _combined, _cdist, (mx, my), _size = result_no_mask
     assert cv2.pointPolygonTest(quad.astype(np.float32), (mx, my), False) < 0, (
         "test setup bug: an unconstrained search should find the only real match, "
         "which is in the leak zone")
@@ -113,12 +114,86 @@ def test_valid_mask_prevents_matching_outside_picture_quad():
                                               scale_photo_per_target=1.0,
                                               coarse_step=20, fine_step=4, fine_range=10,
                                               valid_mask=valid_mask)
-    _angle2, score_with_mask, (mx2, my2), _size2 = result_with_mask
+    _angle2, score_with_mask, _combined2, _cdist2, (mx2, my2), _size2 = result_with_mask
     assert cv2.pointPolygonTest(quad.astype(np.float32), (mx2, my2), False) >= 0, (
         "masked search must not return a location outside the picture quad")
     assert score_with_mask < score_no_mask - 0.3, (
         "masked search should fall back to a much weaker match against unrelated "
         "noise inside the quad, not sneak out to the leak zone")
+
+
+def test_color_correction_prefers_correct_hue_over_stronger_structural_match():
+    """Regression test for two compounding real bugs found on an actual puzzle
+    photo (arrows pointing at spots with an obviously wrong color, e.g. a green
+    piece assigned to a patch of blue sky):
+
+    1. matchTemplate's normalized cross-correlation is surprisingly tolerant of
+       hue mismatches - a modest structural imperfection in the TRUE match
+       (segmentation noise, JPEG artifacts) can easily lose to a pixel-perfect
+       but wrong-colored decoy on raw NCC alone.
+    2. The fine-search window around each coarse candidate was far larger than
+       the minimum separation between distinct coarse candidates, so two
+       genuinely different candidates' windows overlapped and both collapsed
+       onto whichever one had the single strongest peak - silently defeating
+       per-candidate color re-ranking even once it existed, because every
+       "distinct" candidate re-found the exact same location.
+    """
+    rng = np.random.default_rng(3)
+    size = 150
+    base = np.zeros((size, size, 3), np.uint8)
+    for _ in range(60):
+        pt1 = tuple(rng.integers(0, size, size=2).tolist())
+        pt2 = tuple((np.array(pt1) + rng.integers(-30, 30, size=2)).tolist())
+        gray = int(rng.integers(80, 220))
+        line_color = (gray * 0.3, gray * 0.9, gray * 0.3)  # greenish
+        cv2.line(base, pt1, pt2, line_color, 2)
+
+    half_p = 25
+    pcx, pcy = 75, 75
+    piece = base[pcy - half_p:pcy + half_p, pcx - half_p:pcx + half_p].copy()
+    piece_mask = np.full(piece.shape[:2], 255, np.uint8)
+    piece_mask[:6, :6] = 0
+    ph, pw = piece.shape[:2]
+
+    target = np.zeros((600, 600, 3), np.uint8)
+    target[:] = rng.integers(60, 100, size=(600, 600, 3), dtype=np.uint8)
+
+    # true location: correct color, but imperfect (blurred) - a stand-in for
+    # ordinary segmentation/compression noise on a real photo
+    true_cx, true_cy = 200, 200
+    perturbed = cv2.GaussianBlur(piece, (0, 0), 2.0)
+    region = target[true_cy - ph // 2:true_cy - ph // 2 + ph, true_cx - pw // 2:true_cx - pw // 2 + pw]
+    region[piece_mask > 0] = perturbed[piece_mask > 0]
+
+    # decoy: pixel-perfect structural copy, hue-shifted by 30/180 (a clearly
+    # visible color mismatch, not lighting noise) - scores higher raw NCC
+    # than the imperfect true match despite being the wrong color entirely
+    hsv = cv2.cvtColor(piece, cv2.COLOR_BGR2HSV).astype(np.int32)
+    hsv[..., 0] = (hsv[..., 0] + 30) % 180
+    decoy = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    decoy_cx, decoy_cy = 400, 400
+    region2 = target[decoy_cy - ph // 2:decoy_cy - ph // 2 + ph, decoy_cx - pw // 2:decoy_cx - pw // 2 + pw]
+    region2[piece_mask > 0] = decoy[piece_mask > 0]
+
+    search_rect = (0, 0, 600, 600)
+
+    result = match_piece_to_target(piece, piece_mask, target, search_rect,
+                                    scale_photo_per_target=1.0,
+                                    coarse_step=20, fine_step=4, fine_range=10)
+    _angle, ncc, _combined, _cdist, (tx, ty), _size = result
+    assert np.hypot(tx - decoy_cx, ty - decoy_cy) < 5.0, (
+        "test setup bug: without color info, raw NCC should prefer the decoy")
+
+    zero_correction = np.zeros(3, dtype=np.float32)
+    result2 = match_piece_to_target(piece, piece_mask, target, search_rect,
+                                     scale_photo_per_target=1.0,
+                                     coarse_step=20, fine_step=4, fine_range=10,
+                                     color_correction=zero_correction)
+    _angle2, _ncc2, _combined2, color_dist2, (tx2, ty2), _size2 = result2
+    assert np.hypot(tx2 - true_cx, ty2 - true_cy) < 5.0, (
+        "color-aware search should prefer the correctly-colored (if slightly "
+        "imperfect) true match over the wrong-colored decoy")
+    assert color_dist2 < 5.0
 
 
 def test_match_scores_true_match_higher_than_unrelated_piece():
@@ -136,13 +211,28 @@ def test_match_scores_true_match_higher_than_unrelated_piece():
                                     scale_photo_per_target=1.0,
                                     coarse_step=20, fine_step=4, fine_range=10)
     assert result is not None
-    _angle, unrelated_score, _xy, _size = result
+    _angle, unrelated_score, _combined, _cdist, _xy, _size = result
 
     true_piece = target[500:560, 500:560].copy()
     result2 = match_piece_to_target(true_piece, mask, target, search_rect,
                                      scale_photo_per_target=1.0,
                                      coarse_step=20, fine_step=4, fine_range=10)
     assert result2 is not None
-    _angle2, true_score, _xy2, _size2 = result2
+    _angle2, true_score, _combined2, _cdist2, _xy2, _size2 = result2
 
     assert true_score > unrelated_score + 0.2
+
+
+def test_restrict_to_gaps_ands_photo_space_mask_into_target_space():
+    size = 200
+    valid_mask_target = np.full((size, size), 255, np.uint8)  # everywhere valid to start
+
+    gap_mask_photo = np.zeros((size, size), np.uint8)
+    gap_mask_photo[50:100, 50:100] = 255  # only this region is a real gap
+
+    identity_h = np.eye(3, dtype=np.float64)
+    combined = restrict_to_gaps(valid_mask_target, gap_mask_photo, identity_h, (size, size))
+
+    assert combined[75, 75] > 0, "inside the gap should stay valid"
+    assert combined[10, 10] == 0, "outside the gap (already filled) must be excluded"
+    assert combined[150, 150] == 0

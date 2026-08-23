@@ -11,10 +11,11 @@ import sys
 import cv2
 import numpy as np
 
-from .align import align_target_to_photo, local_affine
-from .board import find_assembled_region
+from .align import align_target_to_photo, local_affine, warp_target_into_photo
+from .board import find_assembled_region, find_gaps
+from .color import estimate_color_correction
 from .pieces import build_roi_mask, detect_pieces
-from .match import match_all, flag_conflicts, build_valid_mask
+from .match import match_all, flag_conflicts, build_valid_mask, restrict_to_gaps
 from .visualize import render_solution, render_batches, write_csv
 
 
@@ -120,10 +121,28 @@ def main(argv=None):
     # hand holding it, etc.) - constrain matches to the quad itself to avoid landing there.
     valid_mask = build_valid_mask(target.shape, picture_quad_target)
 
+    print("Finding already-filled spots within the assembled area...")
+    gaps = find_gaps(photo, board.quad)
+    valid_mask = restrict_to_gaps(valid_mask, gaps, aln.homography, target.shape)
+    if not np.any(valid_mask):
+        print("error: no empty gaps found within the assembled area - is the puzzle "
+              "already complete, or did board detection go wrong?", file=sys.stderr)
+        return 1
+
+    print("Calibrating for lighting/white-balance differences between the two photos...")
+    warped_target = warp_target_into_photo(target, photo, aln)
+    filled_mask = cv2.bitwise_and(board.mask, cv2.bitwise_not(gaps))
+    if np.count_nonzero(filled_mask) < 1000:
+        print("  not enough already-assembled area to calibrate color; proceeding without it")
+        color_correction = None
+    else:
+        color_correction = estimate_color_correction(photo, warped_target, filled_mask)
+
     print(f"Matching {len(pieces)} pieces against the target image "
           f"(this can take a while)...")
     matches = match_all(pieces, photo, target, aln, search_rect,
-                         approx_target_point=board_center_target, valid_mask=valid_mask)
+                         approx_target_point=board_center_target, valid_mask=valid_mask,
+                         color_correction=color_correction)
     print(f"  matched {len(matches)} pieces")
 
     conflicts = flag_conflicts(matches, min_distance=0.5 * np.sqrt(avg_piece_area_target))

@@ -59,3 +59,37 @@ def find_assembled_region(photo_bgr, open_ksize=41, close_ksize=25):
     cv2.drawContours(full_mask, [biggest], -1, 255, cv2.FILLED)
 
     return BoardRegion(quad=box, mask=full_mask, contour=biggest)
+
+
+def find_gaps(photo_bgr, board_quad, energy_thresh=35, blur_ksize=15,
+              open_ksize=7, close_ksize=15, erode_edge_px=15):
+    """Within the assembled board's quad, find gaps: spots where no piece is
+    placed yet, so the mat is still showing through.
+
+    find_assembled_region only gives the board's outer extent - RETR_EXTERNAL
+    contours don't record holes, so internal gaps (a piece not yet placed, or
+    an incomplete patch inside an otherwise-built area) are invisible to it.
+    Without this, a match can be "confidently" pointed at a spot that already
+    has a real piece sitting in it.
+
+    Gaps are identified the same way the board itself was found: a plain mat
+    has much lower local texture energy than any printed puzzle-piece content,
+    filled or not - so unlike comparing against the target image pixel-for-
+    pixel, this doesn't depend on lighting/color matching between the two
+    photos, just "is anything printed here at all".
+
+    Returns a 0/255 mask, sized like photo_bgr, that is 255 only where a
+    piece could still be placed (real gaps; the region outside board_quad is
+    NOT included - loose pieces are handled separately from board gaps).
+    """
+    gray = cv2.cvtColor(photo_bgr, cv2.COLOR_BGR2GRAY)
+    energy = _texture_energy(gray, blur_ksize=blur_ksize)
+
+    board_mask = np.zeros(gray.shape, np.uint8)
+    cv2.fillPoly(board_mask, [np.asarray(board_quad, dtype=np.int32)], 255)
+    board_mask = cv2.erode(board_mask, np.ones((erode_edge_px, erode_edge_px), np.uint8))
+
+    gap = ((energy < energy_thresh) & (board_mask > 0)).astype(np.uint8) * 255
+    gap = cv2.morphologyEx(gap, cv2.MORPH_OPEN, np.ones((open_ksize, open_ksize), np.uint8))
+    gap = cv2.morphologyEx(gap, cv2.MORPH_CLOSE, np.ones((close_ksize, close_ksize), np.uint8))
+    return gap
