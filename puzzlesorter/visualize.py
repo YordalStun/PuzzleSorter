@@ -8,7 +8,7 @@ from .match import Match
 from .pieces import Piece
 
 
-def _confidence_tier(score, high=0.55, medium=0.42):
+def _confidence_tier(score, high=0.58, medium=0.45):
     if score >= high:
         return "high", (60, 200, 60)      # green (BGR)
     if score >= medium:
