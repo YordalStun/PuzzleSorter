@@ -103,10 +103,12 @@ This is a *simulation*: it doesn't know whether you actually placed the
 suggested pieces, it just assumes each round's placements are correct and
 builds the next round on top of that assumption. Wrong assumptions compound,
 so it only auto-commits a placement when its score clears
-`--auto-place-threshold` (default 0.45, stricter than the 0.40 "high
+`--auto-place-threshold` (default 0.55, stricter than the 0.50 "high
 confidence" display cutoff elsewhere) — everything else is left for a plain
 `--batch-size` run instead, where a human looks at each suggestion before
-acting on it.
+acting on it. Even so, this isn't a guarantee - see the color-agreement
+blind spot under Limitations - so look at each round's image before trusting
+the next one to build on it.
 
 Output: `solution_round01.jpg`, `solution_round02.jpg`, ... — one image per
 round showing only that round's newly-placed pieces (arrows from where they
@@ -141,6 +143,18 @@ Other useful flags:
 - **Low-detail pieces** (plain sky, water, single-color areas) are
   inherently ambiguous from image content alone — same as for a human
   solver. Trust the confidence color coding.
+- **Color agreement compares averages, not layout**: it's a single mean Lab
+  color over the whole piece and the whole candidate patch, corrected for
+  the two photos' overall lighting difference. A piece with strong internal
+  contrast (e.g. a dark tree silhouette on a light background) can average
+  out to a similar mean color as a patch that's uniformly some in-between
+  tone, even though nothing about their actual layout matches - caught on a
+  real photo, where such a piece cleared the (then-0.45) auto-place bar at
+  0.4519 and got committed to the wrong spot. Structural NCC alone wasn't
+  fooled (0.55, unremarkable), but the combined score was. `--iterate`'s
+  auto-place threshold was raised in response, but a determined enough
+  coincidence can still clear any fixed bar - this is a real, open gap, not
+  fully closed by tuning the number.
 - **Gap detection** is texture-based, same as loose-piece detection: a very
   small single-piece gap right at the edge of the assembled block, or right
   next to a low-texture (plain sky/water) piece, can be missed or merged

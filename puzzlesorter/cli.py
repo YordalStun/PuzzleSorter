@@ -68,11 +68,17 @@ def build_arg_parser():
                         "round's newly-placed pieces only) plus a cumulative CSV. This "
                         "commits to each round's placements before computing the next, so "
                         "it only auto-places matches clearing --auto-place-threshold.")
-    p.add_argument("--auto-place-threshold", type=float, default=0.45,
+    p.add_argument("--auto-place-threshold", type=float, default=0.55,
                    help="Minimum combined score for --iterate to treat a match as placed "
-                        "rather than just suggested. Default 0.45 (stricter than the 0.40 "
+                        "rather than just suggested. Default 0.55 (stricter than the 0.50 "
                         "'high confidence' display cutoff, since a wrong auto-placement "
-                        "affects every later round).")
+                        "affects every later round) - raised from an earlier 0.45 after a "
+                        "real photo run auto-placed a wrong match at 0.4519: a piece with "
+                        "a visually distinctive dark/light pattern (e.g. a tree silhouette) "
+                        "can have a mean color that coincidentally agrees with a plain, "
+                        "differently-toned patch once the whole-photo lighting correction "
+                        "is applied, even though structural NCC alone wasn't fooled. Even "
+                        "at 0.55 this isn't a guarantee - check each round's image.")
     return p
 
 

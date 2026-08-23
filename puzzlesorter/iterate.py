@@ -69,7 +69,7 @@ def _subtract_placed_from_gaps(gap_mask_target, piece_by_id, placed, homography,
 
 def run_iterative_solve(pieces: List[Piece], photo_bgr, target_bgr, alignment: Alignment,
                          search_rect, valid_mask, approx_target_point, avg_piece_area_target,
-                         color_correction=None, auto_place_threshold=0.40, max_rounds=6,
+                         color_correction=None, auto_place_threshold=0.55, max_rounds=6,
                          border_mask=None, corner_mask=None,
                          match_kwargs=None, on_round_complete=None) -> List[Round]:
     """Run up to max_rounds of: match everything still loose, virtually commit
