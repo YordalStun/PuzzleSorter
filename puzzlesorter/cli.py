@@ -14,6 +14,7 @@ import numpy as np
 from .align import align_target_to_photo, local_affine, warp_target_into_photo
 from .board import find_assembled_region, find_gaps
 from .color import estimate_color_correction
+from .iterate import run_iterative_solve
 from .pieces import build_roi_mask, detect_pieces
 from .match import match_all, flag_conflicts, build_valid_mask, restrict_to_gaps
 from .visualize import render_solution, render_batches, write_csv
@@ -59,6 +60,18 @@ def build_arg_parser():
     p.add_argument("--min-inliers", type=int, default=15,
                    help="Minimum ORB inlier matches required to trust the target<->photo "
                         "alignment.")
+    p.add_argument("--iterate", type=int, default=None, metavar="ROUNDS",
+                   help="Simulate placing high-confidence pieces and re-solving for what's "
+                        "left, for up to ROUNDS rounds, without needing a new photo between "
+                        "rounds. Writes <out>_round01.jpg, <out>_round02.jpg, ... (each "
+                        "round's newly-placed pieces only) plus a cumulative CSV. This "
+                        "commits to each round's placements before computing the next, so "
+                        "it only auto-places matches clearing --auto-place-threshold.")
+    p.add_argument("--auto-place-threshold", type=float, default=0.45,
+                   help="Minimum combined score for --iterate to treat a match as placed "
+                        "rather than just suggested. Default 0.45 (stricter than the 0.40 "
+                        "'high confidence' display cutoff, since a wrong auto-placement "
+                        "affects every later round).")
     return p
 
 
@@ -137,6 +150,50 @@ def main(argv=None):
         color_correction = None
     else:
         color_correction = estimate_color_correction(photo, warped_target, filled_mask)
+
+    if args.iterate:
+        print(f"Simulating up to {args.iterate} rounds "
+              f"(auto-place threshold {args.auto_place_threshold})...")
+
+        def _report_round(r):
+            print(f"  round {r.number}: considered {len(r.considered_piece_ids)}, "
+                  f"placed {len(r.placed)}")
+
+        rounds = run_iterative_solve(
+            pieces, photo, target, aln, search_rect, valid_mask, board_center_target,
+            avg_piece_area_target, color_correction=color_correction,
+            auto_place_threshold=args.auto_place_threshold, max_rounds=args.iterate,
+            on_round_complete=_report_round)
+
+        stem, ext = os.path.splitext(args.out)
+        all_placed = []
+        for r in rounds:
+            round_path = f"{stem}_round{r.number:02d}{ext}"
+            vis = render_solution(r.composite_photo, pieces, r.placed, max_arrows=len(r.placed))
+            cv2.imwrite(round_path, vis)
+            all_placed.extend(r.placed)
+
+        if not all_placed:
+            print("error: no round placed anything above --auto-place-threshold - "
+                  "try lowering it, or use single-round mode to see raw suggestions",
+                  file=sys.stderr)
+            return 1
+
+        final_path = f"{stem}_final{ext}"
+        cv2.imwrite(final_path, rounds[-1].composite_photo)
+        print(f"Writing {final_path} (cumulative working photo after all rounds)")
+
+        if args.csv:
+            write_csv(args.csv, pieces, all_placed)
+            print(f"Writing {args.csv} ({len(all_placed)} placed pieces across "
+                  f"{len(rounds)} rounds)")
+
+        still_loose = len(pieces) - len(all_placed)
+        print(f"Placed {len(all_placed)} of {len(pieces)} candidate pieces "
+              f"over {len(rounds)} round(s); {still_loose} still need a fresh photo "
+              f"or manual placement.")
+        print("Done.")
+        return 0
 
     print(f"Matching {len(pieces)} pieces against the target image "
           f"(this can take a while)...")

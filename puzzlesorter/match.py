@@ -19,6 +19,7 @@ class Match:
     # color_correction was supplied to match_all, otherwise equal to ncc_score
     ncc_score: float = None
     color_distance: float = None  # Lab distance at the matched location; None if unscored
+    target_size: Tuple[float, float] = None  # matched footprint (w, h) in target-space pixels
 
 
 def _rotate_with_mask(bgr, mask, angle):
@@ -288,7 +289,7 @@ def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
                                         scale_photo_per_target=seed_scale, **kwargs)
         if result is None:
             continue
-        angle, ncc_score, combined_score, color_dist, (tx, ty), _ = result
+        angle, ncc_score, combined_score, color_dist, (tx, ty), size = result
 
         pt = cv2.perspectiveTransform(np.float32([[[tx, ty]]]), H)[0, 0]
         _, rot_h = local_affine(alignment, (tx, ty))
@@ -302,6 +303,7 @@ def match_all(pieces, photo_bgr, target_bgr, alignment: Alignment, search_rect,
             score=combined_score,
             ncc_score=ncc_score,
             color_distance=color_dist,
+            target_size=(float(size[0]), float(size[1])),
         ))
     return matches
 

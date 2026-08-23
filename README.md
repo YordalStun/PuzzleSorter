@@ -75,6 +75,34 @@ by pixel rectangle so they aren't mistaken for pieces:
 --exclude 230,420,330,140 --exclude 1750,0,248,580
 ```
 
+### Solving in multiple rounds without a new photo each time
+
+`--iterate ROUNDS` simulates placing the high-confidence pieces from one
+round and re-solving for what's left, entirely from the photos you already
+gave it — no need to place pieces for real and re-photograph between
+rounds:
+
+```
+python -m puzzlesorter.cli --unsolved photo.jpg --target box.jpg --pieces 500 \
+  --out solution.jpg --csv solution.csv --iterate 5
+```
+
+This is a *simulation*: it doesn't know whether you actually placed the
+suggested pieces, it just assumes each round's placements are correct and
+builds the next round on top of that assumption. Wrong assumptions compound,
+so it only auto-commits a placement when its score clears
+`--auto-place-threshold` (default 0.45, stricter than the 0.40 "high
+confidence" display cutoff elsewhere) — everything else is left for a plain
+`--batch-size` run instead, where a human looks at each suggestion before
+acting on it.
+
+Output: `solution_round01.jpg`, `solution_round02.jpg`, ... — one image per
+round showing only that round's newly-placed pieces (arrows from where they
+were to where they went) — plus `solution_final.jpg`, the cumulative working
+image after every round, and one CSV covering every piece placed across all
+rounds. Real, physical pieces still need to move to match this - it's telling
+you what to do across several rounds at once, not doing it for you.
+
 Other useful flags:
 - `--pieces N` — the puzzle's piece count (on the box). Only used to estimate
   one piece's pixel size; doesn't need to be exact.
@@ -113,3 +141,9 @@ Other useful flags:
   loose pieces can take several minutes.
 - Clutter on the table (tools, boxes, cups) needs to be pointed out via
   `--exclude`/`--margin-*` — it isn't detected automatically.
+- **`--iterate` compounds errors**: each round trusts every prior round's
+  placements as ground truth. A wrong auto-placement doesn't just mislabel
+  one piece - it can throw off gap detection and color calibration for every
+  piece considered afterward. The auto-place threshold is deliberately
+  strict to make this rare, but it isn't zero; check each round's image
+  against your real board before moving to the next.
