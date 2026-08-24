@@ -53,6 +53,34 @@ def test_rejects_thin_slivers_as_implausible_piece_shapes():
     assert abs(pieces[0].centroid[1] - 100) < 6
 
 
+def test_recovers_a_piece_with_a_mixed_texture_and_plain_region():
+    """Regression test for a real bug found on an actual puzzle photo: a
+    piece whose content mixes a highly-textured area with a plain, low-
+    texture (but still distinctly-colored) area only had its textured part
+    detected - _foreground_mask's single texture-energy threshold has
+    nothing to fire on in a plain region, even though it's clearly not
+    background. A virtual-placement render of the piece visibly showed part
+    of it missing as a result. _refine_piece_mask should recover the whole
+    piece via its local color-based signals, not just the textured half."""
+    rng = np.random.default_rng(3)
+    img = np.full((300, 300, 3), 180, np.uint8)
+
+    cx, cy, half = 150, 150, 20
+    img[cy - half:cy + half, cx - half:cx] = rng.integers(
+        0, 255, size=(2 * half, half, 3), dtype=np.uint8)  # textured left half
+    img[cy - half:cy + half, cx:cx + half] = (40, 40, 40)  # plain dark right half
+
+    roi = build_roi_mask(img.shape)
+    pieces = detect_pieces(img, roi, expected_piece_area=(2 * half) * (2 * half))
+
+    assert len(pieces) == 1
+    full_area = (2 * half) * (2 * half)
+    area = np.count_nonzero(pieces[0].mask)
+    assert area > 0.7 * full_area, (
+        f"piece mask only captured {area}/{full_area} px of a piece with a "
+        "plain region - the plain half was likely missed")
+
+
 def test_exclude_rects_and_margins_remove_regions_from_search():
     rng = np.random.default_rng(1)
     img = np.full((400, 400, 3), 180, np.uint8)
